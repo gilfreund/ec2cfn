@@ -1,0 +1,2256 @@
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  # Control the UI display when running this template from the AWS Management Console:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - NumberOfAZs
+          - PublicSubnets
+          - NATType
+Parameters:
+  # For VPC
+  PublicSubnets:
+    Type: String
+    AllowedValues:
+    - True
+    - False
+    Default: False
+    Description: Do you want to create public subnets in addition to private subnets?
+  NumberOfAZs:
+    Type: Number
+    AllowedValues:
+    - 1
+    - 2
+    - 3
+    Default: 3
+    Description:  How many Availability Zones do you wish to utilize?
+  NATType:
+    Type: String
+    AllowedValues:
+    - "EC2 NAT Instance"
+    - "NAT Gateway"
+    Default:  "NAT Gateway"
+    Description:  What type of NAT to use for private instances to communicate with the internet.  A single EC2 instance can be used as a NAT, or you can use the AWS NAT Gateway (managed, scalable, more expensive).  This setting will be IGNORED if you do not build private subnets.
+  # For EC2 instance
+  LatestAmiIdEC2:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+  # For batch
+  LatestAmiIdEcsCPU:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id'
+  InstancesAMD64:
+    Type: CommaDelimitedList
+    Description: List of X86 instance types
+    Default: c5.12xlarge, c5.large, c5.metal, c5a, c5d, c5n, c6a, c6i, c6id, c6in, c7a, c7i, r5a, r5b, r5d, r5n, r6a, r6i, r6id, r6in
+  InstancesNVIDIA:
+    Type: CommaDelimitedList
+    Description: List of X86 instance types with Nvidia GPU instance types
+    Default: g4ad, g4dn, g5.xlarge, g5.2xlarge, g5.4xlarge, g5.8xlarge, g5.12xlarge, g5.16xlarge, g5.24xlarge, g6.4xlarge, g6.48xlarge, g6e
+  LatestAmazonLinuxAMI:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Latest Amazon linux for NAT Gateway 
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+
+Conditions:
+  BuildPrivateB:      !Not [ !Equals [ !Ref NumberOfAZs, 1 ]]
+  BuildPrivateC:      !Equals [ !Ref NumberOfAZs, 3 ]
+  BuildPublicSubnets: !Equals [ !Ref PublicSubnets, True ]
+  BuildPublicB:       !And [ Condition: BuildPublicSubnets, Condition: BuildPrivateB ]
+  BuildPublicC:       !And [ Condition: BuildPublicSubnets, Condition: BuildPrivateC ]
+  BuildNATGateway:    !Equals [ !Ref NATType, "NAT Gateway" ]
+  BuildNATInstance:   !Equals [ !Ref NATType, "EC2 NAT Instance" ]
+Resources:
+  # VPC
+  stackVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.32.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  # Internet gateway for for the VPC:
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:     
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-InternetGateway
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref stackVPC
+      InternetGatewayId: !Ref InternetGateway
+  # Subnets, 1 to 3 private and 1 to 3 public (optional):
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.11.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private-A
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: BuildPrivateB
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.12.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the second AZ in the list
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private-B
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Condition: BuildPrivateC
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.13.0/24
+      AvailabilityZone: !Select [ 2, !GetAZs ]    # Get the third AZ in the list
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private-C
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.21.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list
+      MapPublicIpOnLaunch:  true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-A
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: BuildPublicB
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.22.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the second AZ in the list
+      MapPublicIpOnLaunch:  true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-B
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Condition: BuildPublicC
+    Properties:
+      VpcId: !Ref stackVPC
+      CidrBlock: 172.32.23.0/24
+      AvailabilityZone: !Select [ 2, !GetAZs ]    # Get the third AZ in the list
+      MapPublicIpOnLaunch:  true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-C
+      - Key: vpc
+        Value: !Sub ${AWS::StackName}-VPC
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  # Route tables for subnets:
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref stackVPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PublicRoute1:   # Public route table has direct routing to IGW:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  # Here is a private route table:
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref stackVPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  PrivateRoute:            # Private route table can access web via NAT (created below)
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      # If we are using a NAT Instance, route traffic through the NAT Instance:
+      InstanceId:   !If [ BuildNATInstance, !Ref NATInstance, !Ref "AWS::NoValue" ]
+      # Otherwise if we are using a NAT Gateway, route traffic through the NAT Gateway:
+      NatGatewayId: !If [ BuildNATGateway, !Ref NATGateway, !Ref "AWS::NoValue" ]
+  # Attach the public subnets to public route tables,
+  # and attach the private subnets to private route tables:
+  RouteTableAssociationPublicSubnetA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+  RouteTableAssociationPublicSubnetB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: BuildPublicB
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+  RouteTableAssociationPublicSubnetC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: BuildPublicC
+    Properties:
+      SubnetId: !Ref PublicSubnetC
+      RouteTableId: !Ref PublicRouteTable
+  RouteTableAssociationPrivateSubnetA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+  RouteTableAssociationPrivateSubnetB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: BuildPrivateB
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+  RouteTableAssociationPrivateSubnetC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: BuildPrivateC
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref PrivateRouteTable
+  NATSecurityGroup:
+  # A security group for our NAT.  Ingress from the VPC IPs only.  Egress is TCP & UDP only:
+    Type: AWS::EC2::SecurityGroup
+    Condition: BuildNATInstance
+    DependsOn: AttachGateway
+    Properties:
+      GroupName: !Sub NATSecurityGroup-${AWS::StackName}
+      GroupDescription: Enable internal access to the NAT device
+      VpcId: !Ref stackVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '0'
+        ToPort: '1024'
+        CidrIp: !GetAtt stackVPC.CidrBlock
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: '0'
+        ToPort: '65535'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: udp
+        FromPort: '0'
+        ToPort: '65535'
+        CidrIp: 0.0.0.0/0
+  NATInstance:
+  # A NAT Instance will be built and used if the user specified an EC2 instance over a managed Gateway.
+    Type: AWS::EC2::Instance
+    Condition: BuildNATInstance
+    Properties:
+      ImageId: !Ref LatestAmazonLinuxAMI  # We lookup the AMI from the Region Map
+      InstanceType: t2.small              # Any instance type is fine
+      NetworkInterfaces:
+      - DeviceIndex: '0'
+        SubnetId: !Ref PrivateSubnetA                                  # Any public subnet is fine
+        AssociatePublicIpAddress: true                                # We will definitely need a public IP address
+        GroupSet: [!Ref NATSecurityGroup]                             # Plug in the security group
+      SourceDestCheck: false              # NATs don't work if EC2 tries the match source addresses with destinations.
+      Tags:
+      - Key: Name
+        Value: !Sub NAT-${AWS::StackName}
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+      UserData:      #  This code is NAT code.  Look at how the last line signals the wait condition:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum -y update
+          yum install -y aws-cfn-bootstrap
+          echo 1 > /proc/sys/net/ipv4/ip_forward
+          echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects
+          /sbin/iptables -t nat -A POSTROUTING -o eth0 -s 0.0.0.0/0 -j MASQUERADE
+          /sbin/iptables-save > /etc/sysconfig/iptables
+          mkdir -p /etc/sysctl.d/
+          cat << NatConfFileMarker > /etc/sysctl.d/nat.conf
+          net.ipv4.ip_forward = 1
+          net.ipv4.conf.eth0.send_redirects = 0
+          NatConfFileMarker
+          /opt/aws/bin/cfn-signal -e 0 --resource NATInstance --stack ${AWS::StackName} --region ${AWS::Region}
+    # This NATInstance is only complete when you get 1 signal back within 5 minutes'.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT5M
+  NATGateway:
+  # A NAT Gateway will be built and used if the user selected a Gateway instead of an EC2 instance.
+    Type: AWS::EC2::NatGateway
+    Condition: BuildNATGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-NAT-GW
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  NATGatewayIP:
+    Type: AWS::EC2::EIP
+    Condition: BuildNATGateway
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-NAT-IP
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+
+  # Endpoints
+  endpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for SSM VPC endpoints"
+      VpcId: !Ref stackVPC
+      SecurityGroupIngress:
+        - CidrIp: !GetAtt stackVPC.CidrBlock
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-endpoint-SG
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  ssmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      VpcId: !Ref stackVPC
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - '*'
+            Resource:
+              - '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ssm
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  ssmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      VpcId: !Ref stackVPC
+      SecurityGroupIds:
+        - !Ref endpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ssmmessages
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      VpcEndpointType: Interface
+      VpcId: !Ref stackVPC
+      SecurityGroupIds:
+        - !Ref endpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2messages
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  logsEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      VpcId: !Ref stackVPC
+      SecurityGroupIds:
+        - !Ref endpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-logs
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  s3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: 'Gateway'
+      VpcId: !Ref stackVPC
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - '*'
+            Resource:
+              - '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-S3
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  # Storage
+  ## S3 Buckets
+  inputsS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-inputs
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        TransitionDefaultMinimumObjectSize: all_storage_classes_128K
+        Rules:
+          - Status: Enabled
+            NoncurrentVersionTransitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+                NewerNoncurrentVersions: 1
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+            Id: !Sub ${AWS::StackName}-inputs
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Value: !Sub ${AWS::StackName}
+          Key: project
+  referenceS3:
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      AnalyticsConfigurations:
+        - StorageClassAnalysis: {}
+          Id: !Sub ${AWS::StackName}-reference
+      BucketName: !Sub ${AWS::StackName}-references
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        TransitionDefaultMinimumObjectSize: all_storage_classes_128K
+        Rules:
+          - Status: Enabled
+            NoncurrentVersionTransitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+                NewerNoncurrentVersions: 1
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+            Id: !Sub ${AWS::StackName}-reference
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Value: !Sub ${AWS::StackName}
+          Key: project
+  resultsS3:
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain    
+    Type: AWS::S3::Bucket
+    Properties:
+      AnalyticsConfigurations:
+        - StorageClassAnalysis: {}
+          Id: !Sub ${AWS::StackName}-results
+      BucketName: !Sub ${AWS::StackName}-results
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        TransitionDefaultMinimumObjectSize: all_storage_classes_128K
+        Rules:
+          - Status: Enabled
+            NoncurrentVersionTransitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+                NewerNoncurrentVersions: 1
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+            Id: !Sub ${AWS::StackName}-results
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Value: !Sub ${AWS::StackName}
+          Key: project
+  ## EFS
+  efsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 'kms:*'
+            Resource:
+              - '*'
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-EFS-key
+      - Key: project
+        Value: !Sub ${AWS::StackName}
+  efsSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Access to EFS shares"
+      GroupName: "EFS"
+      VpcId:
+        Ref: stackVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 0.0.0.0/0
+      Tags:
+      - Value: "EFS"
+        Key: "Name"
+      - Value: !Sub ${AWS::StackName}
+        Key: "project"
+  ### General purpose file system used as 
+  GeneralPurposeFS:
+    Type: "AWS::EFS::FileSystem"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      KmsKeyId:
+        !GetAtt
+          - efsKey
+          - Arn
+      PerformanceMode: "generalPurpose"
+      Encrypted: true
+      FileSystemProtection:
+        ReplicationOverwriteProtection: "ENABLED"
+      LifecyclePolicies:
+      - TransitionToIA: "AFTER_60_DAYS"
+      - TransitionToArchive: "AFTER_90_DAYS"
+      ThroughputMode: "elastic"
+      BackupPolicy:
+        Status: "DISABLED"
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName} resources"
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  MountTargetGeneralPurposeFSa:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: GeneralPurposeFS
+      SubnetId:
+        Ref: PrivateSubnetA
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  MountTargetGeneralPurposeFSb:
+    Type: AWS::EFS::MountTarget
+    Condition: BuildPrivateB
+    Properties:
+      FileSystemId:
+        Ref: GeneralPurposeFS
+      SubnetId:
+        Ref: PrivateSubnetB
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  MountTargetGeneralPurposeFSc:
+    Type: AWS::EFS::MountTarget
+    Condition: BuildPrivateC
+    Properties:
+      FileSystemId:
+        Ref: GeneralPurposeFS
+      SubnetId:
+        Ref: PrivateSubnetC
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  GeneralPurposeAccessPoint:
+      Type: 'AWS::EFS::AccessPoint'
+      Properties:
+        FileSystemId: !Ref GeneralPurposeFS
+        PosixUser:
+          Uid: "1000"
+          Gid: "100"
+        RootDirectory:
+          CreationInfo:
+            OwnerGid: "100"
+            OwnerUid: "1000"
+            Permissions: "2775"
+        AccessPointTags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-GeneralPurposeFS
+          - Key: project
+            Value: !Sub ${AWS::StackName}
+
+  ### MaxIO file system used as shared
+  MaxIoFS:
+    Type: "AWS::EFS::FileSystem"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      KmsKeyId:
+        !GetAtt
+          - efsKey
+          - Arn
+      PerformanceMode: "maxIO"
+      Encrypted: true
+      FileSystemProtection:
+        ReplicationOverwriteProtection: "ENABLED"
+      LifecyclePolicies:
+      - TransitionToIA: "AFTER_30_DAYS"
+      - TransitionToPrimaryStorageClass: "AFTER_1_ACCESS"
+      ThroughputMode: "bursting"
+      BackupPolicy:
+        Status: "DISABLED"
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName} shared"
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  MountMaxIoFSa:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: MaxIoFS
+      SubnetId:
+        Ref: PrivateSubnetA
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  MountMaxIoFSb:
+    Type: AWS::EFS::MountTarget
+    Condition: BuildPrivateB
+    Properties:
+      FileSystemId:
+        Ref: MaxIoFS
+      SubnetId:
+        Ref: PrivateSubnetB
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  MountMaxIoFSc:
+    Type: AWS::EFS::MountTarget
+    Condition: BuildPrivateC
+    Properties:
+      FileSystemId:
+        Ref: MaxIoFS
+      SubnetId:
+        Ref: PrivateSubnetC
+      SecurityGroups:
+      - Ref: efsSecurityGroup
+  MaxIoAccessPoint:
+      Type: 'AWS::EFS::AccessPoint'
+      Properties:
+        FileSystemId: !Ref MaxIoFS
+        PosixUser:
+          Uid: "1000"
+          Gid: "100"
+        RootDirectory:
+          CreationInfo:
+            OwnerGid: "100"
+            OwnerUid: "1000"
+            Permissions: "2775"
+        AccessPointTags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-MaxIoFS
+          - Key: project
+            Value: !Sub ${AWS::StackName}
+
+  ## EC2 Instances
+  ### Interactive instances
+  ec2SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Access to EC2 nodes"
+      GroupName: "EC2"
+      VpcId:
+        Ref: stackVPC
+      SecurityGroupIngress:
+      - CidrIp: "18.202.216.48/29"
+        IpProtocol: "tcp"
+        Description: "EC2 Instance Connect"
+        FromPort: 22
+        ToPort: 22
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+      Tags:
+      - Value: "EC2"
+        Key: "Name"
+      - Value: !Sub ${AWS::StackName}
+        Key: "project"
+  ec2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: !Sub "/${AWS::StackName}/"
+      Roles:
+      - Ref: "ec2InstanceRole"
+  ec2ec2ManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Path: !Sub "/${AWS::StackName}/"
+      Description: "The sanity check for validating efs_fs_id requires the IAM role\
+        \ to have the following permissions"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
+          Action: "iam:PassRole"
+          Effect: "Allow"
+          Sid: "PassRole"
+        - Resource: "*"
+          Action:
+          - "tag:UntagResources"
+          - "tag:GetTagValues"
+          - "s3:GetObjectVersionTagging"
+          - "ec2:DescribeSnapshots"
+          - "s3:GetObjectAcl"
+          - "ec2:DeleteVolume"
+          - "ec2:DescribeVolumeStatus"
+          - "ec2:DescribeVolumes"
+          - "s3:GetObjectVersionAcl"
+          - "s3:PutObjectTagging"
+          - "s3:DeleteObject"
+          - "cloudformation:ExecuteChangeSet"
+          - "s3:DeleteObjectTagging"
+          - "s3:GetBucketPolicyStatus"
+          - "ec2:DetachVolume"
+          - "s3:GetBucketWebsite"
+          - "ec2:CreateTags"
+          - "s3:ListJobs"
+          - "ec2:RunInstances"
+          - "s3:DeleteObjectVersionTagging"
+          - "s3:GetBucketNotification"
+          - "s3:GetReplicationConfiguration"
+          - "ec2:DescribeVolumeAttribute"
+          - "ec2:CreateVolume"
+          - "cloudformation:DescribeStacks"
+          - "s3:ListMultipartUploadParts"
+          - "s3:PutObject"
+          - "s3:GetObject"
+          - "s3:DescribeJob"
+          - "ec2:DescribeInstanceTypes"
+          - "s3:GetAnalyticsConfiguration"
+          - "s3:GetObjectVersionForReplication"
+          - "ec2:AttachVolume"
+          - "s3:GetLifecycleConfiguration"
+          - "tag:GetResources"
+          - "s3:GetBucketTagging"
+          - "s3:GetInventoryConfiguration"
+          - "ec2:DeleteSnapshot"
+          - "s3:ListBucketVersions"
+          - "s3:GetBucketLogging"
+          - "s3:ReplicateTags"
+          - "s3:ListBucket"
+          - "s3:GetAccelerateConfiguration"
+          - "tag:GetTagKeys"
+          - "s3:GetBucketPolicy"
+          - "tag:TagResources"
+          - "s3:GetObjectVersionTorrent"
+          - "s3:GetEncryptionConfiguration"
+          - "s3:AbortMultipartUpload"
+          - "s3:PutBucketTagging"
+          - "s3:GetBucketRequestPayment"
+          - "ec2:CreateSnapshot"
+          - "s3:GetObjectTagging"
+          - "s3:GetMetricsConfiguration"
+          - "ec2:ModifyInstanceAttribute"
+          - "s3:PutObjectAcl"
+          - "s3:GetBucketPublicAccessBlock"
+          - "elasticfilesystem:DescribeMountTargets"
+          - "ec2:ModifyInstanceMetadataOptions"
+          - "cloudformation:ListStacks"
+          - "s3:ListBucketMultipartUploads"
+          - "ec2:DescribeTags"
+          - "s3:PutObjectVersionTagging"
+          - "elasticfilesystem:DescribeAccessPoints"
+          - "s3:GetBucketVersioning"
+          - "s3:GetBucketAcl"
+          - "cloudformation:GetTemplateSummary"
+          - "s3:GetObjectTorrent"
+          - "s3:GetAccountPublicAccessBlock"
+          - "s3:ListAllMyBuckets"
+          - "s3:GetBucketCORS"
+          - "s3:GetBucketLocation"
+          - "s3:GetObjectVersion"
+          - "elasticfilesystem:DescribeMountTargetSecurityGroups"
+          Effect: "Allow"
+          Sid: "VisualEditor7"
+        - Resource:
+          - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
+          - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:*:stack/*/*"
+          Action:
+          - "cloudformation:DescribeStackEvents"
+          - "cloudformation:CreateChangeSet"
+          - "cloudformation:DescribeChangeSet"
+          Effect: "Allow"
+          Sid: "VisualEditor8"
+  ec2InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+      - "arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilderECRContainerBuilds"
+      - !Ref DecodeAuthorizationMessagePolicy
+      - !Ref ec2ec2ManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchLogsFullAccess"
+      - !Ref ec2storageManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSBatchFullAccess"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ec2.amazonaws.com"
+  ec2storageManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Path: !Sub "/${AWS::StackName}/"
+      Description: "Storage access policy for EC2 and ECS nodes"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Resource: "*"
+          Action:
+          - "s3:GetObjectVersionTagging"
+          - "ec2:DescribeSnapshots"
+          - "s3:GetObjectAcl"
+          - "ec2:DeleteVolume"
+          - "ec2:DescribeVolumeStatus"
+          - "ec2:DescribeVolumes"
+          - "s3:GetObjectVersionAcl"
+          - "s3:PutObjectTagging"
+          - "s3:DeleteObject"
+          - "s3:DeleteObjectTagging"
+          - "s3:GetBucketPolicyStatus"
+          - "s3:GetBucketWebsite"
+          - "ec2:CreateTags"
+          - "s3:ListJobs"
+          - "s3:DeleteObjectVersionTagging"
+          - "s3:GetBucketNotification"
+          - "s3:GetReplicationConfiguration"
+          - "ec2:DescribeVolumeAttribute"
+          - "ec2:CreateVolume"
+          - "s3:ListMultipartUploadParts"
+          - "s3:PutObject"
+          - "s3:GetObject"
+          - "s3:DescribeJob"
+          - "s3:GetAnalyticsConfiguration"
+          - "s3:GetObjectVersionForReplication"
+          - "ec2:AttachVolume"
+          - "s3:GetLifecycleConfiguration"
+          - "s3:GetBucketTagging"
+          - "s3:GetInventoryConfiguration"
+          - "s3:ListBucketVersions"
+          - "s3:GetBucketLogging"
+          - "s3:ReplicateTags"
+          - "s3:ListBucket"
+          - "s3:GetAccelerateConfiguration"
+          - "s3:GetBucketPolicy"
+          - "s3:GetObjectVersionTorrent"
+          - "s3:GetEncryptionConfiguration"
+          - "s3:AbortMultipartUpload"
+          - "s3:PutBucketTagging"
+          - "s3:GetBucketRequestPayment"
+          - "s3:GetObjectTagging"
+          - "s3:GetMetricsConfiguration"
+          - "ec2:ModifyInstanceAttribute"
+          - "s3:PutObjectAcl"
+          - "s3:GetBucketPublicAccessBlock"
+          - "elasticfilesystem:DescribeMountTargets"
+          - "s3:ListBucketMultipartUploads"
+          - "s3:PutObjectVersionTagging"
+          - "elasticfilesystem:DescribeAccessPoints"
+          - "s3:GetBucketVersioning"
+          - "s3:GetBucketAcl"
+          - "s3:GetObjectTorrent"
+          - "s3:GetAccountPublicAccessBlock"
+          - "s3:ListAllMyBuckets"
+          - "s3:GetBucketCORS"
+          - "s3:GetBucketLocation"
+          - "s3:GetObjectVersion"
+          - "elasticfilesystem:DescribeMountTargetSecurityGroups"
+          Effect: "Allow"
+          Sid: "VisualEditor0"
+  ec2LaunchTemplate:
+      Type: "AWS::EC2::LaunchTemplate"
+      Properties:
+        TagSpecifications:
+          - ResourceType: "launch-template"
+            Tags:
+              - Key: "Project"
+                Value: !Sub ${AWS::StackName}
+        LaunchTemplateData:
+          SecurityGroupIds:
+               - !Ref ec2SecurityGroup
+          TagSpecifications:
+            - ResourceType: "instance"
+              Tags:
+                - Key: Name
+                  Value: "BuildInstance"
+                - Key: "project"
+                  Value: !Sub ${AWS::StackName}
+            - ResourceType: "volume"
+              Tags:
+                - Key: "Name"
+                  Value: "BatchInstance"
+                - Key: "project"
+                  Value: !Sub ${AWS::StackName}
+          UserData:
+            Fn::Base64: !Sub |
+              Content-Type: multipart/mixed; boundary="BOUNDARY"
+              MIME-Version: 1.0
+
+              --BOUNDARY
+              #cloud-config 
+              Content-Type: text/cloud-config; charset="us-ascii"
+              MIME-Version: 1.0
+              Content-Transfer-Encoding: 7bit
+              Content-Disposition: attachment; filename="ec2init.yaml"
+
+              repo_update: true
+              repo_upgrade: all
+              package_update: true
+              package_upgrade: all
+              packages:
+              - vim-enhanced
+              - curl
+              - amazon-ssm-agent
+              - jq
+              - sed
+              - wget
+              - git
+              - unzip
+              - lvm2              
+
+              --BOUNDARY
+              Content-Type: text/x-shellscript; charset="us-ascii"
+              MIME-Version: 1.0
+              Content-Transfer-Encoding: 7bit
+              Content-Disposition: attachment; filename="ec2init.script"
+              #!/bin/bash
+              # vim:ft=sh
+              AVAILABILITY_ZONE=$(TOKEN=`curl --request PUT "http://169.254.169.254/latest/api/token" --silent --header "X-aws-ec2-metadata-token-ttl-seconds: 21600"` && curl --silent --header "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+              INSTANCE_ID=$(TOKEN=`curl --request PUT "http://169.254.169.254/latest/api/token" --silent --header "X-aws-ec2-metadata-token-ttl-seconds: 21600"` && curl --silent --header "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)                
+              echo \* OS and architecture detect
+              if [ -f /etc/os-release ]; then
+                  # shellcheck source=/etc/os-release
+                  # shellcheck disable=SC1091
+                  source /etc/os-release
+              fi
+              INSTANCE_ARCH=$(uname -p)
+
+              echo \* Download and install utilities
+              echo \** Download and install aws cli v2
+              INSTANCE_ARCH=$(uname -p)
+              curl --silent "https://awscli.amazonaws.com/awscli-exe-linux-$INSTANCE_ARCH.zip" -o "/tmp/awscliv2.zip"
+              unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+              rm -rf /tmp/aws/aws*
+              echo \** Download and install aws SAM cli
+              wget --quiet  "https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-$INSTANCE_ARCH.zip" --output-document "aws-sam-cli-linux.zip"
+              unzip -q aws-sam-cli-linux.zip -d /tmp/sam-installation && /tmp/sam-installation/install --update
+              rm -rf /tmp/sam-installation aws-sam-cli-linux.zip
+              echo \** Download and install aws S3 mount
+              case $ID in 
+                  amzn)
+                      yum update --assumeyes --quiet
+                      curl --silent "https://s3.amazonaws.com/mountpoint-s3-release/latest/$INSTANCE_ARCH/mount-s3.rpm" -o "/tmp/mount-s3.rpm"
+                      yum install --assumeyes --quiet /tmp/mount-s3.rpm amazon-efs-utils git lvm2 jq
+                      rm -f /tmp/mount-s3.rpm 
+                  ;;
+                  Ubuntu|debian)
+                      curl --silent "https://s3.amazonaws.com/mountpoint-s3-release/latest/$INSTANCE_ARCH/mount-s3.deb" -o "/tmp/mount-s3.deb"
+                      apt update --yes
+                      apt install -yes unzip nfs-common git lvm2 /tmp/mount-s3.deb
+                  ;;
+              esac
+
+              echo \* Install docker and \(optionaly\) install CUDA if this is a GPU instance
+              GPUTYPE=$(aws --output text ec2 describe-instance-types \
+                --instance-types "$INSTANCETYPE" \
+                --query InstanceTypes[].[GpuInfo.Gpus[0].Manufacturer])
+              case $GPUTYPE in 
+                NVIDIA )
+                  if [[ $VERSION_ID -eq 2023 ]] ; then
+                  echo \** Installing CUDA
+                  yum update --assumeyes --quiet
+                  yum install --assumeyes --quiet dkms kernel-devel kernel-modules-extra
+                  cd /tmp || return
+                  if (arch | grep -q x86); then
+                    yum --quiet config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/amzn2023/"$INSTANCE_ARCH"/cuda-amzn2023.repo
+                    yum --quiet clean all
+                    yum module install --assumeyes --quiet nvidia-driver:latest-dkms
+                    yum install --assumeyes --quiet cuda-toolkit
+                  else
+                    yum install --assumeyes --quiet vulkan-devel libglvnd-devel elfutils-libelf-devel
+                    wget https://developer.download.nvidia.com/compute/cuda/12.6.0/local_yums/cuda_12.6.0_560.28.03_linux_sbsa.run
+                    chmod +x ./cuda*.run
+                    # shellcheck disable=SC2211
+                    ./cuda_*.run --driver --toolkit --tmpdir=/var/tmp --silent
+                          rm -f ./cuda_*.run
+                  fi
+                  yum --quiet config-manager --add-repo https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+                  yum --quiet clean expire-cache
+                  yum install --assumeyes --quiet nvidia-container-toolkit docker
+                      echo \** Installing Docker
+                  usermod -aG docker ec2-user
+                  nvidia-ctk runtime configure --runtime=docker
+                  systemctl restart docker
+                      echo \** Verify docker and GPU
+                      docker run --rm --runtime=nvidia --gpus all public.ecr.aws/amazonlinux/amazonlinux:2023 nvidia-smi
+                  fi
+                  ;;
+                  *)
+                      echo \** Installing Docker
+                      yum install --assumeyes --quiet docker
+                      usermod -a -G docker ec2-user
+                  systemctl restart docker
+              ;;  
+              esac
+              yum --assumeyes --quiet clean all
+              echo \* mount file systems  
+              echo \** Create mount points
+              for mountpoint in inputs shared resources results references scratch; do
+                  mkdir -p /$mountpoint
+                  chown 1000.100 /$mountpoint
+                  chmod 2775 /$mountpoint
+                  echo creted $mountpoint mount point
+              done
+              echo \** Mount EFS
+              if ! $(mountpoint -q /shared) ; then
+                  mount -t efs -o tls,accesspoint=${MaxIoAccessPoint} ${MaxIoFS}:/ /shared
+              fi
+              if ! $(mountpoint -q /resources) ; then
+                  mount -t efs -o tls,accesspoint=${GeneralPurposeAccessPoint} ${GeneralPurposeFS}:/ /resources
+              fi
+              
+         
+              echo \*** Mount local storage
+
+              ## Variables
+              MOUNTPOINT="/scratch"
+              LVNAME="scratch"
+              LVM_SUPPRESS_FD_WARNINGS=1	# LVM seems to get annoyed in cloud-init settings, so suppress warnings
+              export LVM_SUPPRESS_FD_WARNINGS
+              EBS_SIZE=100
+              case $ID in
+                  amzn)
+                  ROOT_DEVICE_LABLE="/"
+                  ;;
+                Ubuntu|Debian)
+                  ROOT_DEVICE_LABLE="cloudimg-rootfs"
+                  ;;
+                *)
+                  echo "Linux distribution not detected:"
+                  exit 127
+                  ;;
+              esac
+              ROOT_DRIVE=$(blkid -L "$ROOT_DEVICE_LABLE" -o device)
+              ROOT_DRIVE=${!ROOT_DRIVE##*/}
+              case $ROOT_DRIVE in
+                sda1)
+                  IGNORE_DRIVE_PATTERN="sda"
+                  EBS_DEVICENAME="sdz"
+                ;;
+                xvda1)
+                  IGNORE_DRIVE_PATTERN="xvda"
+                  EBS_DEVICENAME="xvdz"
+                ;;
+                nvme0n1p1)
+                  IGNORE_DRIVE_PATTERN="nvme0n1"
+                  EBS_DEVICENAME="xvdz"
+                ;;
+                nvme1n1p1)
+                  IGNORE_DRIVE_PATTERN="nvme1n1"
+                  EBS_DEVICENAME="xvdz"
+                ;;
+                *)
+                  echo "Unknown naming scheme, exiting ...."
+                  exit 4
+                ;;
+              esac
+              ## Functions
+              # Create EBS (if ephemeral storage is not sufficient)
+              function create_ebs {
+                local EBS_DEVICE="$1"
+                local EBS_SIZE=$2
+                local VOLUME_ID
+                VOLUME_ID="$(aws ec2 create-volume --output text \
+                  --output text \
+                  --size "$EBS_SIZE" \
+                  --volume-type gp3 \
+                  --availability-zone "${!AVAILABILITY_ZONE}" \
+                  --query VolumeId)"
+                # In theory this shouldn't need to loop as aws ec2 wait will retry but I have seen it exceed request limits
+                aws ec2 wait volume-available --volume-ids ${!VOLUME_ID}
+                aws ec2 wait volume-in-use --volume-ids ${!VOLUME_ID}
+                if [[ -z "$INSTANCE_NAME" ]] ; then
+                local INSTANCE_NAME
+                INSTANCE_NAME=$(aws ec2 describe-tags \
+                  --output text \
+                  --filters Name=resource-id,Values="$INSTANCE_ID" Name=key,Values=Name \
+                  --query Tags[*].ResourceId)
+                fi
+                aws ec2 modify-instance-attribute \
+                  --output text \
+                  --instance-id  "$INSTANCE_ID" \
+                  --block-device-mappings DeviceName="$EBS_DEVICE",Ebs=\{DeleteOnTermination=true\}
+                aws ec2 create-tags \
+                  --output text \
+                  --resources "${!VOLUME_ID}" \
+                  --tags Key=Name,Value="${!INSTANCE_NAME}" > /dev/null
+                echo "/dev/${!EBS_DEVICE}"
+              }
+
+              function detect_devices { 
+                local DEVICES_LIST
+                DEVICES_LIST=$(find /dev -type b | grep -Ev "$IGNORE_DRIVE_PATTERN|loop|dm|xvdcz")
+                if [[ -z $DEVICES_LIST ]] ; then
+                  if [[ -n $EBS_SIZE ]] && [[ $EBS_SIZE -gt 0 ]] ; then
+                    local DEVICES
+                    DEVICES=$(create_ebs $EBS_DEVICENAME "$EBS_SIZE")
+                  else
+                    echo "No ephemeral devices found and no fallback EBS devices configured"
+                    exit 4
+                  fi
+                else
+                  for DEVICE in $DEVICES_LIST ; do
+                    if grep -q "$(readlink -f "$DEVICE")" /proc/mounts ; then
+                      umount "$DEVICE"
+                      sed -i.bak /"${!DEVICE//\//\\/}"/d /etc/fstab
+                    fi
+                    local DEVICES+=" $DEVICE"
+                  done
+                fi
+                      echo ${!DEVICES[@]}
+              }
+
+              # Creates a new LVM volume. Accepts an array of block devices to use as physical storage. 
+              function create_volume { 	
+                for device in "$@" ; do
+                  pvcreate "$device" --yes --quiet > /dev/null
+                done 
+                vgcreate $LVNAME "$@" --quiet
+                lvcreate -l 100%FREE $LVNAME --yes --quiet > /dev/null
+                lvdisplay --columns --options "lv_path" --noheading
+              } 
+
+              while [[ -z $VOLUME ]] ; do
+                create_volume $(detect_devices)
+                VOLUME=$(lvdisplay --columns --options "lv_path" --noheading)
+              done
+
+              mkfs -t ext4 $VOLUME
+              mkdir -p $MOUNTPOINT
+              mount $VOLUME $MOUNTPOINT 
+              chown 1000.100 $MOUNTPOINT
+              chmod 2777 $MOUNTPOINT
+              echo "Mounted $VOLUME"
+
+              service docker stop
+              cat <<EOF > /etc/docker/daemon.json
+                  {
+                    "data-root": "/scratch/docker/"
+                  }
+              EOF
+              service docker start
+              echo \** mount S3 files systems
+              mkdir -p $MOUNTPOINT/cache
+              if ! $(mountpoint -q /references) ; then
+                  mkdir -p $MOUNTPOINT/cache/references
+                  mount-s3 ${referenceS3} /references --cache $MOUNTPOINT/cache/references --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+              fi
+              if ! $(mountpoint -q /results) ; then
+                  mkdir -p $MOUNTPOINT/cache/results
+                  mount-s3 ${resultsS3} /results --cache $MOUNTPOINT/cache/results --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+              fi
+              if ! $(mountpoint -q /inputs) ; then
+                  mkdir -p $MOUNTPOINT/cache/results
+                  mount-s3 ${inputsS3} /inputs --cache $MOUNTPOINT/cache/results --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+              fi
+              echo \** Mounting DB to instances. 
+              dbName="colabfold"
+              dbMountLocation="/mnt/${!dbName}"
+              SnapshotId=$(aws --output text ec2 describe-snapshots --filters Name=tag:Name,Values="${!dbName}" --query "Snapshots[*].[SnapshotId]")
+              if [[ -z ${!SnapshotId} ]]; then 
+                echo "no snapshot image found for ${!dbName}..." 
+                exit 1
+              else
+                echo "Using snapshot: ${!SnapshotId}"
+              fi
+              VolumeId=$( aws ec2 create-volume --output text \
+                --volume-type gp3 \
+                --availability-zone "${!AVAILABILITY_ZONE}" \
+                --snapshot-id "${!SnapshotId}" \
+                --tag-specifications "ResourceType=volume,Tags=[{Key=Name,Value=${!dbName}}]" \
+                --query VolumeId)
+              echo "Creating volume $VolumeId from ${!SnapshotId} in ${!AVAILABILITY_ZONE} for ${!dbName}"
+                
+              echo "Attaching to instance $INSTANCE_ID"
+              for deviceLetter in {f..p}; do
+                if [[ ! -e "/dev/sd${!deviceLetter}" ]] ; then
+                  ebsDeviceName="/dev/sd${!deviceLetter}"
+                  echo "Use device name $ebsDeviceName" 
+                  break
+                fi
+              done
+              if [[ "$ebsDeviceName" == "/dev/sd" ]] ; then
+                echo "No available drive letters found"
+                exit 1
+              fi
+
+              echo "Waiting for $VolumeId to become available"
+              aws ec2 wait volume-available --volume-ids ${!VolumeId}
+
+              aws ec2 attach-volume \
+                --device "$ebsDeviceName" \
+                --instance-id "${!INSTANCE_ID}" \
+                --volume-id "$VolumeId" 
+
+              # Wait for volume to become attached, make sure DeleteOnTermination is enabled, and rename volumes
+              echo "Attching $VolumeId to ${!INSTANCE_ID} using $ebsDeviceName"
+              aws ec2 wait volume-in-use --volume-ids ${!VolumeId}
+              echo "volume ${!VolumeId} attached"
+              echo "Volume attachment of $VolumeId to $INSTANCE_ID using $ebsDeviceName become $VolumeAttachmentState"
+
+              if [[ ! -d ${!dbMountLocation} ]] ; then 
+                mkdir -p "${!dbMountLocation}"
+                chown "$DEFUSER".users "${!dbMountLocation}"
+                chmod 2775 "${!dbMountLocation}"
+              fi
+              echo "Waiting for $ebsDeviceName to be available"
+              while [[ ! -b $ebsDeviceName ]] ; do
+                sleep 1
+              done
+              echo "Device $ebsDeviceName became available"
+              mount $ebsDeviceName "${!dbMountLocation}"
+              grep "${!dbMountLocation}" /proc/mounts
+              if grep -q "${!dbMountLocation}" /proc/mounts ; then
+                echo "${!dbName} is mounted on ${!dbMountLocation}"
+              else
+                echo "Something is wrong, no files or directories in ${!dbMountLocation}"
+                exit 1
+              fi
+              aws ec2 modify-instance-attribute \
+                  --output text \
+                  --instance-id  "$INSTANCE_ID" \
+                  --block-device-mappings DeviceName="$ebsDeviceName",Ebs=\{DeleteOnTermination=true\}
+              aws ec2 create-tags \
+                --resources "$VolumeId" \
+                --tags Key=Name,Value="${!INSTANCE_NAME}-${!dbName}" 
+              echo "done"
+
+              --BOUNDARY
+          IamInstanceProfile:
+            Arn: !GetAtt
+              - ec2InstanceProfile
+              - Arn
+          ImageId: !Ref LatestAmiIdEC2
+          MetadataOptions:
+              HttpEndpoint: "enabled"
+              HttpTokens: "optional"
+              InstanceMetadataTags: "enabled"
+          BlockDeviceMappings:
+            - Ebs:
+                VolumeSize: 20
+                VolumeType: gp3
+                DeleteOnTermination: true
+                Encrypted: true
+              DeviceName: /dev/xvda
+          KeyName: !Ref ec2KeyPair
+          
+  AutoScalingAutoScalingGroupCPU:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-CPU
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification: 
+            LaunchTemplateId: !Ref ec2LaunchTemplate
+            Version: !GetAtt ec2LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceRequirements:
+                # AcceleratorNames: 
+                #  - String
+                # AcceleratorTotalMemoryMiB: 
+                #    Max: Integer
+                #    Min: Integergpu
+                BareMetal: excluded
+                # MemoryGiBPerVCpu: 
+                #   MemoryGiBPerVCpuRequest
+                MemoryMiB: 
+                  Min: 16                 
+                VCpuCount: 
+                  Min: 4
+        InstancesDistribution: 
+            OnDemandAllocationStrategy: "lowest-price"
+            OnDemandBaseCapacity: 0
+            OnDemandPercentageAboveBaseCapacity: 0
+            SpotAllocationStrategy: "price-capacity-optimized"
+      MinSize: 0
+      MaxSize: 1
+      DesiredCapacity: 0
+      HealthCheckType: "EC2"
+      VPCZoneIdentifier: 
+      - !Ref PrivateSubnetA
+      - !If [BuildPrivateB,!Ref PrivateSubnetB, !Ref AWS::NoValue ]
+      - !If [BuildPrivateC,!Ref PrivateSubnetC, !Ref AWS::NoValue ]
+      TerminationPolicies: 
+        - "Default"
+      Tags: 
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+          PropagateAtLaunch: true
+        - Key: Name
+          Value: BuildInstance-CPU
+          PropagateAtLaunch: true
+      NewInstancesProtectedFromScaleIn: false
+  AutoScalingAutoScalingGroupGPU:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+        AutoScalingGroupName: !Sub ${AWS::StackName}-GPU
+        MinSize: 0
+        MaxSize: 1
+        MixedInstancesPolicy: 
+          LaunchTemplate: 
+            LaunchTemplateSpecification: 
+              LaunchTemplateId: !Ref ec2LaunchTemplate
+              Version: !GetAtt ec2LaunchTemplate.LatestVersionNumber
+            Overrides: 
+              - InstanceRequirements:
+                  AcceleratorCount: 
+                    Min: 1
+                  AcceleratorManufacturers: 
+                    - nvidia
+                  # AcceleratorNames: 
+                  #  - String
+                  # AcceleratorTotalMemoryMiB: 
+                  #    Max: Integer
+                  #    Min: Integer
+                  AcceleratorTypes: 
+                    - gpu
+                  BareMetal: excluded
+                  # MemoryGiBPerVCpu: 
+                  #   MemoryGiBPerVCpuRequest
+                  MemoryMiB: 
+                    Min: 1                 
+                  VCpuCount: 
+                    Min: 1     
+        HealthCheckType: "EC2"
+        HealthCheckGracePeriod: 300
+        VPCZoneIdentifier: 
+        - !Ref PrivateSubnetA
+        - !If [BuildPrivateB,!Ref PrivateSubnetB, !Ref AWS::NoValue ]
+        - !If [BuildPrivateC,!Ref PrivateSubnetC, !Ref AWS::NoValue ]
+        TerminationPolicies: 
+          - "Default"
+        Tags: 
+          - Key: project
+            Value: !Sub ${AWS::StackName}
+            PropagateAtLaunch: true
+          - Key: Name
+            Value: BuildInstance-GPU    
+            PropagateAtLaunch: true
+        NewInstancesProtectedFromScaleIn: false
+  ec2KeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties: 
+      KeyName: !Sub ${AWS::StackName}-ec2
+      Tags: 
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  ## Batch elements
+  AmazonEC2SpotFleetTaggingRole:
+    UpdateReplacePolicy: Delete
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole
+      MaxSessionDuration: 3600
+      Description: Required service policies to support tagging spot fleet instances
+        on AWS Batch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: spotfleet.amazonaws.com
+      Tags:
+        - Value: project
+          Key: mas
+  ecsTaskRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      ManagedPolicyArns:
+      - !Ref ec2ec2ManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonS3FullAccess"
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSBatchFullAccess"
+      MaxSessionDuration: 3600
+      Description: "Allows ECS tasks to call AWS services on your behalf."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ecs-tasks.amazonaws.com"
+          Sid: ""
+  ecsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy"
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      - !Ref ec2CloudWatchManagedPolicy
+      - !Ref DecodeAuthorizationMessagePolicy
+      - !Ref ec2ec2ManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchLogsFullAccess"
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSBatchFullAccess"
+      MaxSessionDuration: 3600
+      Description: "Allows EC2 instances to call AWS services on your behalf."
+      Policies:
+      - PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Resource: "*"
+            Action:
+            - "iam:ListPolicies"
+            - "iam:GetPolicyVersion"
+            - "events:DescribeRule"
+            - "iam:GetPolicy"
+            - "lambda:GetLayerVersion"
+            - "iam:ListGroupPolicies"
+            - "iam:ListEntitiesForPolicy"
+            - "iam:ListUserPolicies"
+            - "lambda:GetLayerVersionPolicy"
+            - "iam:GetGroup"
+            - "iam:ListSSHPublicKeys"
+            - "iam:ListPolicyVersions"
+            - "iam:ListAttachedRolePolicies"
+            - "events:ListRules"
+            - "lambda:ListLayers"
+            - "iam:ListUsers"
+            - "iam:ListAttachedGroupPolicies"
+            - "iam:ListGroups"
+            - "iam:GetGroupPolicy"
+            - "iam:ListRolePolicies"
+            - "events:ListTargetsByRule"
+            - "iam:ListAccessKeys"
+            Effect: "Allow"
+            Sid: "VisualEditor0"
+        PolicyName: !Sub BackupElements-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ec2.amazonaws.com"
+      Tags:
+        - Value: !Sub ${AWS::StackName}
+          Key: "Project"
+  ecsInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+      - !Ref ec2ec2ManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchLogsFullAccess"
+      - !Ref ec2storageManagedPolicy
+      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSBatchFullAccess"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ec2.amazonaws.com"
+  ecsInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      Roles:
+      - Ref: "ecsInstanceRole"
+  ec2CloudWatchManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      Description: "Ensure that the scripts have permission to perform CloudWatch\
+        \ operations"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Resource: !Sub "arn:${AWS::Partition}:ec2:*:*:instance/*"
+          Action:
+          - "ec2:DeleteTags"
+          - "ec2:CreateTags"
+          Effect: "Allow"
+          Sid: "VisualEditor0"
+        - Resource: "*"
+          Action:
+          - "cloudwatch:PutMetricData"
+          - "logs:DescribeLogStreams"
+          - "ec2:DescribeTags"
+          - "cloudwatch:GetMetricStatistics"
+          - "cloudwatch:ListMetrics"
+          Effect: "Allow"
+          Sid: "VisualEditor1"
+  ecsKeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties: 
+      KeyName: !Sub ${AWS::StackName}-ecs
+      Tags: 
+        - Key: project
+          Value: !Sub ${AWS::StackName}
+  DecodeAuthorizationMessagePolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      Description: ""
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Resource: "*"
+          Action: "sts:DecodeAuthorizationMessage"
+          Effect: "Allow"
+          Sid: "VisualEditor0"
+  ecsLaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      TagSpecifications:
+          - ResourceType: "launch-template"
+            Tags:
+              - Key: "Project"
+                Value: !Sub ${AWS::StackName}
+      LaunchTemplateData:
+        SecurityGroupIds:
+          - !Ref ec2SecurityGroup
+        TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+              - Key: "Name"
+                Value: "BatchInstance"
+              - Key: "project"
+                Value: !Sub ${AWS::StackName}
+          - ResourceType: "volume"
+            Tags:
+              - Key: "Name"
+                Value: "BatchInstance"
+              - Key: "project"
+                Value: !Sub ${AWS::StackName}
+        IamInstanceProfile:
+          Arn: !GetAtt
+            - ecsInstanceProfile
+            - Arn
+        MetadataOptions:
+            HttpEndpoint: "enabled"
+            HttpTokens: "optional"
+            InstanceMetadataTags: "enabled"
+        BlockDeviceMappings:
+          - Ebs:
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+            DeviceName: /dev/xvda
+        UserData:
+          Fn::Base64: !Sub |
+            Content-Type: multipart/mixed; boundary="BOUNDARY"
+            MIME-Version: 1.0
+
+            --BOUNDARY
+            #cloud-config 
+            Content-Type: text/cloud-config; charset="us-ascii"
+            MIME-Version: 1.0
+            Content-Transfer-Encoding: 7bit
+            Content-Disposition: attachment; filename="ec2init.yaml"
+
+            repo_update: true
+            repo_upgrade: all
+            package_update: true
+            package_upgrade: all
+            packages:
+            - vim-enhanced
+            - curl
+            - amazon-ssm-agent
+            - jq
+            - sed
+            - wget
+            - git
+            - unzip
+            - lvm2              
+
+            --BOUNDARY
+            Content-Type: text/x-shellscript; charset="us-ascii"
+            MIME-Version: 1.0
+            Content-Transfer-Encoding: 7bit
+            Content-Disposition: attachment; filename="ec2init.script"
+            #!/bin/bash
+            # vim:ft=sh
+            AVAILABILITY_ZONE=$(TOKEN=`curl --request PUT "http://169.254.169.254/latest/api/token" --silent --header "X-aws-ec2-metadata-token-ttl-seconds: 21600"` && curl --silent --header "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            INSTANCE_ID=$(TOKEN=`curl --request PUT "http://169.254.169.254/latest/api/token" --silent --header "X-aws-ec2-metadata-token-ttl-seconds: 21600"` && curl --silent --header "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+            echo \* OS and architecture detect
+            if [ -f /etc/os-release ]; then
+                # shellcheck source=/etc/os-release
+                # shellcheck disable=SC1091
+                source /etc/os-release
+            fi
+            INSTANCE_ARCH=$(uname -p)
+
+            echo \* Download and install utilities
+            echo \** Download and install aws cli v2
+            INSTANCE_ARCH=$(uname -p)
+            curl --silent "https://awscli.amazonaws.com/awscli-exe-linux-$INSTANCE_ARCH.zip" -o "/tmp/awscliv2.zip"
+            unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+            rm -rf /tmp/aws/aws*
+            echo \** Download and install aws S3 mount
+            case $ID in 
+                amzn)
+                    yum update --assumeyes --quiet
+                    curl --silent "https://s3.amazonaws.com/mountpoint-s3-release/latest/$INSTANCE_ARCH/mount-s3.rpm" -o "/tmp/mount-s3.rpm"
+                    yum install --assumeyes --quiet /tmp/mount-s3.rpm amazon-efs-utils git lvm2 jq
+                    rm -f /tmp/mount-s3.rpm 
+                ;;
+                Ubuntu|debian)
+                    curl --silent "https://s3.amazonaws.com/mountpoint-s3-release/latest/$INSTANCE_ARCH/mount-s3.deb" -o "/tmp/mount-s3.deb"
+                    apt update --yes
+                    apt install -yes unzip nfs-common git lvm2 /tmp/mount-s3.deb
+                ;;
+            esac
+
+            echo \* mount file systems  
+            echo \** Create mount points
+            for mountpoint in inputs shared resources results references scratch; do
+                mkdir -p /$mountpoint
+                chown 1000.100 /$mountpoint
+                chmod 2775 /$mountpoint
+                echo creted $mountpoint mount point
+            done
+            echo \** Mount EFS
+            if ! $(mountpoint -q /shared) ; then
+                mount -t efs -o tls,accesspoint=${MaxIoAccessPoint} ${MaxIoFS}:/ /shared
+            fi
+            if ! $(mountpoint -q /resources) ; then
+                mount -t efs -o tls,accesspoint=${GeneralPurposeAccessPoint} ${GeneralPurposeFS}:/ /resources
+            fi
+            
+            
+            echo \*** Mount local storage
+
+            ## Variables
+            MOUNTPOINT="/scratch"
+            LVNAME="scratch"
+            LVM_SUPPRESS_FD_WARNINGS=1	# LVM seems to get annoyed in cloud-init settings, so suppress warnings
+            export LVM_SUPPRESS_FD_WARNINGS
+            EBS_SIZE=100
+            case $ID in
+                amzn)
+                ROOT_DEVICE_LABLE="/"
+                ;;
+              Ubuntu|Debian)
+                ROOT_DEVICE_LABLE="cloudimg-rootfs"
+                ;;
+              *)
+                echo "Linux distribution not detected:"
+                exit 127
+                ;;
+            esac
+            ROOT_DRIVE=$(blkid -L "$ROOT_DEVICE_LABLE" -o device)
+            ROOT_DRIVE=${!ROOT_DRIVE##*/}
+            case $ROOT_DRIVE in
+              sda1)
+                IGNORE_DRIVE_PATTERN="sda"
+                EBS_DEVICENAME="sdz"
+              ;;
+              xvda1)
+                IGNORE_DRIVE_PATTERN="xvda"
+                EBS_DEVICENAME="xvdz"
+              ;;
+              nvme0n1p1)
+                IGNORE_DRIVE_PATTERN="nvme0n1"
+                EBS_DEVICENAME="xvdz"
+              ;;
+              nvme1n1p1)
+                IGNORE_DRIVE_PATTERN="nvme1n1"
+                EBS_DEVICENAME="xvdz"
+              ;;
+              *)
+                echo "Unknown naming scheme, exiting ...."
+                exit 4
+              ;;
+            esac
+            ## Functions
+            # Create EBS (if ephemeral storage is not sufficient)
+            function create_ebs {
+              local EBS_DEVICE="$1"
+              local EBS_SIZE=$2
+              local VOLUME_ID
+              VOLUME_ID="$(aws ec2 create-volume --output text \
+                --output text \
+                --size "$EBS_SIZE" \
+                --volume-type gp3 \
+                --availability-zone "${!AVAILABILITY_ZONE}" \
+                --query VolumeId)" 
+              local VOLUME_STATE="none"
+              while [ "$VOLUME_STATE" != "available" ] ; do 
+                local VOLUME_STATE
+                VOLUME_STATE=$(aws ec2 describe-volumes \
+                  --output text \
+                  --volume-id "${!VOLUME_ID}" \
+                  --query Volumes[*].[State])
+              done	
+              local VOLUME_ATTACHMENT_STATE="none"
+              VOLUME_ATTACHMENT_STATE=$(aws ec2 attach-volume \
+                --output text \
+                --device "$EBS_DEVICE" \
+                --instance-id "$INSTANCE_ID" \
+                --volume-id "${!VOLUME_ID}" \
+                --query State)
+              while [ "$VOLUME_ATTACHMENT_STATE" != "attached" ] ; do 
+                local VOLUME_ATTACHMENT_STATE
+                VOLUME_ATTACHMENT_STATE=$(aws ec2 describe-volumes \
+                  --output text \
+                  --volume-id "${!VOLUME_ID}" \
+                  --query Volumes[*].[Attachments[*].State])
+              done
+              if [[ -z "$INSTANCE_NAME" ]] ; then
+              local INSTANCE_NAME
+              INSTANCE_NAME=$(aws ec2 describe-tags \
+                --output text \
+                --filters Name=resource-id,Values="$INSTANCE_ID" Name=key,Values=Name \
+                --query Tags[*].ResourceId)
+              fi
+              aws ec2 modify-instance-attribute \
+                --output text \
+                --instance-id  "$INSTANCE_ID" \
+                --block-device-mappings DeviceName="$EBS_DEVICE",Ebs=\{DeleteOnTermination=true\}
+              aws ec2 create-tags \
+                --output text \
+                --resources "${!VOLUME_ID}" \
+                --tags Key=Name,Value="${!INSTANCE_NAME}" > /dev/null
+              echo "/dev/${!EBS_DEVICE}"
+            }
+
+            function detect_devices { 
+              local DEVICES_LIST
+              DEVICES_LIST=$(find /dev -type b | grep -Ev "$IGNORE_DRIVE_PATTERN|loop|dm|xvdcz")
+              if [[ -z $DEVICES_LIST ]] ; then
+                if [[ -n $EBS_SIZE ]] && [[ $EBS_SIZE -gt 0 ]] ; then
+                  local DEVICES
+                  DEVICES=$(create_ebs $EBS_DEVICENAME "$EBS_SIZE")
+                else
+                  echo "No ephemeral devices found and no fallback EBS devices configured"
+                  exit 4
+                fi
+              else
+                for DEVICE in $DEVICES_LIST ; do
+                  if grep -q "$(readlink -f "$DEVICE")" /proc/mounts ; then
+                    umount "$DEVICE"
+                    sed -i.bak /"${!DEVICE//\//\\/}"/d /etc/fstab
+                  fi
+                  local DEVICES+=" $DEVICE"
+                done
+              fi
+                    echo ${!DEVICES[@]}
+            }
+
+            # Creates a new LVM volume. Accepts an array of block devices to use as physical storage. 
+            function create_volume { 	
+              for device in "$@" ; do
+                pvcreate "$device" --yes --quiet > /dev/null
+              done 
+              vgcreate $LVNAME "$@" --quiet
+              lvcreate -l 100%FREE $LVNAME --yes --quiet > /dev/null
+              lvdisplay --columns --options "lv_path" --noheading
+            } 
+
+            while [[ -z $VOLUME ]] ; do
+              create_volume $(detect_devices)
+              VOLUME=$(lvdisplay --columns --options "lv_path" --noheading)
+            done
+
+            mkfs -t ext4 $VOLUME
+            mkdir -p $MOUNTPOINT
+            mount $VOLUME $MOUNTPOINT 
+            chown 1000.100 $MOUNTPOINT
+            chmod 2777 $MOUNTPOINT
+            echo "Mounted $VOLUME"
+            
+            echo \** mount S3 files systems with cache
+            mkdir -p $MOUNTPOINT/cache
+            if ! $(mountpoint -q /references) ; then
+                mkdir -p $MOUNTPOINT/cache/references
+                mount-s3 ${referenceS3} /references --cache $MOUNTPOINT/cache/references --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+            fi
+            if ! $(mountpoint -q /results) ; then
+                mkdir -p $MOUNTPOINT/cache/results
+                mount-s3 ${resultsS3} /results --cache $MOUNTPOINT/cache/results --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+            fi
+            if ! $(mountpoint -q /inputs) ; then
+                mkdir -p $MOUNTPOINT/cache/inputs
+                mount-s3 ${inputsS3} /inputs --cache $MOUNTPOINT/cache/inputs --allow-delete --allow-overwrite --allow-other --incremental-upload --uid 1000 --gid 100 --dir-mode 0775 --file-mode 0664
+            fi
+            echo \** Mounting DB to instances. 
+            dbName="colabfold"
+            dbMountLocation="/mnt/${!dbName}"
+            SnapshotId=$(aws --output text ec2 describe-snapshots --filters Name=tag:Name,Values="${!dbName}" --query "Snapshots[*].[SnapshotId]")
+            if [[ -z ${!SnapshotId} ]]; then 
+              echo "no snapshot image found for ${!dbName}..." 
+              exit 1
+            else
+              echo "Using snapshot: ${!SnapshotId}"
+            fi
+
+            VolumeId=$( aws ec2 create-volume --output text \
+              --volume-type gp3 \
+              --availability-zone "${!AVAILABILITY_ZONE}" \
+              --snapshot-id "${!SnapshotId}" \
+              --tag-specifications "ResourceType=volume,Tags=[{Key=Name,Value=${!dbName}}]" \
+              --query VolumeId)
+            echo "Creating volume $VolumeId from ${!SnapshotId} in ${!AVAILABILITY_ZONE} for ${!dbName}"
+              
+            echo "Attaching to instance $INSTANCE_ID"
+            for deviceLetter in {f..p}; do
+              if [[ ! -e "/dev/sd${!deviceLetter}" ]] ; then
+                ebsDeviceName="/dev/sd${!deviceLetter}"
+                echo "Use device name $ebsDeviceName" 
+                break
+              fi
+            done
+            if [[ "$ebsDeviceName" == "/dev/sd" ]] ; then
+              echo "No available drive letters found"
+              exit 1
+            fi
+
+            echo "Waiting for $VolumeId to become available"
+            aws ec2 wait volume-available --volume-ids ${!VolumeId}
+
+            aws ec2 attach-volume \
+              --device "$ebsDeviceName" \
+              --instance-id "$INSTANCE_ID" \
+              --volume-id "$VolumeId" 
+
+            # Wait for volume to become attached, make sure DeleteOnTermination is enabled, and rename volumes
+            echo "Attching $VolumeId to $INSTANCE_ID using $ebsDeviceName"
+            aws ec2 wait volume-in-use --volume-ids ${!VolumeId}
+            echo "Volume attachment of $VolumeId to $INSTANCE_ID using $ebsDeviceName become $VolumeAttachmentState"
+
+            if [[ ! -d ${!dbMountLocation} ]] ; then 
+              mkdir -p "${!dbMountLocation}"
+              chown "$DEFUSER".users "${!dbMountLocation}"
+              chmod 2775 "${!dbMountLocation}"
+            fi
+            echo "Waiting for $ebsDeviceName to be available"
+            while [[ ! -b $ebsDeviceName ]] ; do
+              sleep 1
+            done
+            echo "Device $ebsDeviceName became available"
+            mount $ebsDeviceName "${!dbMountLocation}"
+            grep "${!dbMountLocation}" /proc/mounts
+            if grep -q "${!dbMountLocation}" /proc/mounts ; then
+              echo "${!dbName} is mounted on ${!dbMountLocation}"
+            else
+              echo "Something is wrong, no files or directories in ${!dbMountLocation}"
+              exit 1
+            fi
+              aws ec2 modify-instance-attribute \
+                  --output text \
+                  --instance-id  "$INSTANCE_ID" \
+                  --block-device-mappings DeviceName="$ebsDeviceName",Ebs=\{DeleteOnTermination=true\}
+              aws ec2 create-tags \
+                --resources "$VolumeId" \
+                --tags Key=Name,Value="${!INSTANCE_NAME}-${!dbName}" 
+            echo "done"
+            --BOUNDARY
+        KeyName: !Ref ecsKeyPair
+  ### Compute environment
+  ComputeEnvironmentCPU:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: SPOT
+        MinvCpus: 0
+        MaxvCpus: 512
+        InstanceTypes: !Ref InstancesAMD64
+        Subnets:
+          - !Ref PrivateSubnetA
+          - !If [BuildPrivateB,!Ref PrivateSubnetB, !Ref AWS::NoValue ]
+          - !If [BuildPrivateC,!Ref PrivateSubnetC, !Ref AWS::NoValue ]
+        InstanceRole: !Ref ecsInstanceProfile
+        AllocationStrategy: SPOT_PRICE_CAPACITY_OPTIMIZED
+        SpotIamFleetRole: !Ref AmazonEC2SpotFleetTaggingRole
+        Tags:
+          project: !Sub ${AWS::StackName}
+          Name: BatchInstanceCPU
+        SecurityGroupIds:
+          - !Ref ec2SecurityGroup
+        LaunchTemplate:
+          LaunchTemplateId: !Ref ecsLaunchTemplate
+          Version: !GetAtt ecsLaunchTemplate.LatestVersionNumber
+        ImageId: !Ref LatestAmiIdEcsCPU
+        UpdateToLatestImageVersion: true
+      Tags:
+        project: !Sub ${AWS::StackName}
+  ComputeEnvironmentGPU:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: EC2
+        MinvCpus: 0
+        MaxvCpus: 512
+        InstanceTypes: !Ref InstancesNVIDIA
+        Subnets:
+          - !Ref PrivateSubnetA
+          - !If [BuildPrivateB,!Ref PrivateSubnetB, !Ref AWS::NoValue ]
+          - !If [BuildPrivateC,!Ref PrivateSubnetC, !Ref AWS::NoValue ]
+        InstanceRole: !Ref ecsInstanceProfile
+        Tags:
+          project: !Sub ${AWS::StackName}
+          Name: BatchNode-GPU
+        LaunchTemplate:
+          LaunchTemplateId: !Ref ecsLaunchTemplate
+          Version: !GetAtt ecsLaunchTemplate.LatestVersionNumber
+        UpdateToLatestImageVersion: true
+      Tags:
+        project: !Sub ${AWS::StackName}
+  ### Queues
+  JobQueueCPU:
+    Type: 'AWS::Batch::JobQueue'
+    Properties:
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironmentCPU
+      State: ENABLED
+      JobQueueName: CPU
+      Priority: 0
+  JobQueueGPU:
+    Type: 'AWS::Batch::JobQueue'
+    Properties:
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironmentGPU
+      State: ENABLED
+      JobQueueName: GPU
+      Priority: 0
+  ### Job Definitions
+  JobDefinitionBase:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: !Sub ${AWS::StackName}-base
+      Type: container
+      PropagateTags: true
+      RetryStrategy:
+        Attempts: 3
+        EvaluateOnExit:
+          - Action: retry
+            OnStatusReason: Host EC2 *
+          - Action: exit
+            OnExitCode: 1*
+          - Action: exit
+            OnExitCode: 2*
+      ContainerProperties:
+        ResourceRequirements:
+          - Type: MEMORY
+            Value: 512
+          - Type: VCPU
+            Value: 1
+        MountPoints:
+          - SourceVolume: MaxIoFS
+            ContainerPath: /shared
+          - SourceVolume: GeneralPurposeFS
+            ContainerPath: /resources
+          - SourceVolume: references
+            ContainerPath: /references
+          - SourceVolume: results
+            ContainerPath: /results
+          - SourceVolume: inputs
+            ContainerPath: /inputs
+          - SourceVolume: scratch
+            ContainerPath: /scratch
+          - SourceVolume: mnt
+            ContainerPath: /mnt          
+        Volumes:
+          - Name: GeneralPurposeFS
+            EfsVolumeConfiguration:
+              FileSystemId: !Ref GeneralPurposeFS
+              TransitEncryption: ENABLED
+              AuthorizationConfig: 
+                AccessPointId: !Ref GeneralPurposeAccessPoint
+          - Name: MaxIoFS
+            EfsVolumeConfiguration:
+              FileSystemId: !Ref MaxIoFS
+              TransitEncryption: ENABLED
+              AuthorizationConfig: 
+                AccessPointId: !Ref MaxIoAccessPoint
+          - Host:
+              SourcePath: /references
+            Name: references
+          - Host:
+              SourcePath: /results
+            Name: results
+          - Host:
+              SourcePath: /inputs
+            Name: inputs
+          - Host:
+              SourcePath: /scratch
+            Name: scratch
+          - Host:
+              SourcePath: /mnt
+            Name: mnt
+        LinuxParameters:
+          Devices:
+            - ContainerPath: /dev/fuse
+              HostPath: /dev/fuse
+        Image: 
+          Fn::Sub: ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/base:latest
+        User: '1000:100'
+  # BatchInstanceTemplate:
+  #   Type: AWS::EC2::LaunchTemplate
+  #   Properties:
+  #     TagSpecifications:
+  #       - ResourceType: launch-template
+  #         Tags:
+  #           - Key: project
+  #             Value: !Sub ${AWS::StackName}
+  #     LaunchTemplateData:
+  #       TagSpecifications:
+  #         - ResourceType: "instance"
+  #           Tags:
+  #             - Key: "Name"
+  #               Value: "BatchInstance"
+  #             - Key: "project"
+  #               Value: !Sub ${AWS::StackName}
+  #         - ResourceType: "volume"
+  #           Tags:
+  #             - Key: "Name"
+  #               Value: "BuildInstance"
+  #             - Key: "project"
+  #               Value: !Sub ${AWS::StackName}
+  #       IamInstanceProfile:
+  #         Arn: !GetAtt
+  #           - ec2InstanceProfile
+  #           - Arn
+  #       ImageId: !Ref LatestAmiIdEC2
+  #       MetadataOptions:
+  #           HttpEndpoint: "enabled"
+  #           HttpTokens: "optional"
+  #           InstanceMetadataTags: "enabled"
+  #       BlockDeviceMappings:
+        #   - Ebs:
+        #       VolumeType: gp3
+        #       DeleteOnTermination: true
+        #       Encrypted: true
+        #     DeviceName: /dev/xvda
+        # # NetworkInterfaces:
+        # #   - AssociatePublicIpAddress: false
+  ### Container Repositories
+  baseRepository:
+    Type: AWS::ECR::Repository
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: RetainExceptOnCreate
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: base
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      Tags:
+        - Key: "project"
+          Value: !Sub ${AWS::StackName}
+      ImageTagMutability: MUTABLE
+
+Outputs:
+  # Networking
+  VPC:
+    Description: VPC of the base network
+    Value: !Ref stackVPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+  PublicSubnetA:
+    Description: First Public Subnet
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetA
+  PublicSubnetB:
+    Description: Second Public Subnet
+    Condition: BuildPublicB
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetB
+  PublicSubnetC:
+    Description: Third Public Subnet
+    Condition: BuildPublicC
+    Value: !Ref PublicSubnetC
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetC
+  PrivateSubnetA:
+    Description: First Private Subnet
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetA
+  PrivateSubnetB:
+    Condition: BuildPrivateB
+    Description: Second Private Subnet
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetB
+  PrivateSubnetC:
+    Condition: BuildPrivateC
+    Description: Third Private Subnet
+    Value: !Ref PrivateSubnetC
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetC
+  # Storage
+  ## Bucket
+  referenceS3:
+    Description: S3 Reference data bucket
+    Value: !Ref referenceS3
+    Export:
+      Name: !Sub ${AWS::StackName}-referenceS3
+  resultsS3:
+    Description: S3 Result data bucket
+    Value: !Ref resultsS3
+    Export:
+      Name: !Sub ${AWS::StackName}-resultsS3
+  inputsS3:
+    Description: S3 Result data bucket
+    Value: !Ref inputsS3
+    Export:
+      Name: !Sub ${AWS::StackName}-inputsS3
+  ## EFS
+  GeneralPurposeFS:
+    Description: EFS for Code and configurations
+    Value: !Ref GeneralPurposeFS
+    Export:
+      Name: !Sub ${AWS::StackName}-GeneralPurposeFS
+  MaxIoFS:
+    Description: EFS for Refrence data generation
+    Value: !Ref MaxIoFS
+    Export:
+      Name: !Sub ${AWS::StackName}-MaxIoFS
+  GeneralPurposeAccessPoint:
+    Description: EFS mountpoint for Refrence data generation
+    Value:  !Ref GeneralPurposeAccessPoint
+    Export:
+      Name: !Sub ${AWS::StackName}-GeneralPurposeAccessPoint
+  MaxIoAccessPoint:
+    Description: EFS mountpoint for Refrence data generation
+    Value:  !Ref MaxIoAccessPoint
+    Export:
+      Name: !Sub ${AWS::StackName}-MaxIoAccessPoint      
+  # Compute
+  ## EC2
+  ec2LaunchTemplate:
+    Description: Launch template for EC2 instances
+    Value: !Ref ec2LaunchTemplate
+    Export:
+      Name: !Sub ${AWS::StackName}-ec2LaunchTemplate
+  ## Batch
+  ecsLaunchTemplate:
+    Description: Launch template for batch
+    Value: !Ref ecsLaunchTemplate
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-ecsLaunchTemplate
+  ComputeEnvironmentCPU:
+    Description: Computer environment for CPU Jobs
+    Value: !Ref ComputeEnvironmentCPU
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-ComputeEnvironmentCPU
+  ComputeEnvironmentGPU:
+    Description: Computer environment for GPU Jobs
+    Value: !Ref ComputeEnvironmentGPU
+      # Export:
+      #   Name: !Sub ${AWS::StackName}-ComputeEnvironmentGPU
+  JobQueueCPU:
+    Description: CPU Jobs queue
+    Value: !Ref JobQueueCPU
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-JobQueueCPU
+  JobQueueGPU:
+    Description: CPU Jobs queue
+    Value: !Ref JobQueueGPU
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-JobQueueGPU
+  baseRepository:
+    Description: Baseline AmazonLinux 2024 with CLI and Mount-S3
+    Value: !Ref baseRepository
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-baseRepository

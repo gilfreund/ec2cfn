@@ -94,12 +94,8 @@ Mount S3 buckets for data and archive access
 * [ ] TODO: Remove Instance dashboard when the instance is deleted (or a certain time afterward)
 
 ## Scripts
-### Instance launcher
-Launch an instance based on the launch template providing the instance type and (optionally), AMI, username (to be included in the instance name) and project.
-* [ ] TODO: Add needed local volume size
-### Docker launcher
-Launch a docker container with the parameters used in the batch system on the instance for monitoring 
-* [ ] TODO: need to automake script build to use 
+### Users scripts
+
 # Architectural decisions
 * Do not use custom AMI, to avoid maintenance overhead.
 # Known limitations

@@ -7,6 +7,7 @@ Description: >
   See also:
     https://github.com/kgoudak/cloudformation-templates
 Metadata:
+  # Control the UI display when running this template from the AWS Management Console:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:

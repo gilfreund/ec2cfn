@@ -1,6 +1,12 @@
 AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  This template creates a VPC with public and private subnets, NAT instance or NAT gateway, S3 buckets, EFS file systems, and EC2 instances.
+  It is based on work by Ken Kroger:
+    https://www.infoq.com/articles/aws-vpc-cloudformation-part2/
+    https://github.com/kennyk65/aws-vpc-cloud-formation
+  See also:
+    https://github.com/kgoudak/cloudformation-templates
 Metadata:
-  # Control the UI display when running this template from the AWS Management Console:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
